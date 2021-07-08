@@ -58,7 +58,6 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 import torchvision.transforms as T
-import torchvision.models as models
 
 is_ipython = 'inline' in matplotlib.get_backend()
 if is_ipython:
@@ -156,9 +155,10 @@ class DQN(nn.Module):
 # simplicity.
 #
 class Q_learning_model:
-    def __init__(self):
+    def __init__(self, model_name):
+        self.model_name = model_name
         self.device = torch.device("cpu")
-        self.env = gym.make('CartPole-v0').unwrapped
+        self.env = gym.make(model_name).unwrapped
         self.env.reset()
         init_screen = self.get_screen()
         _, _, screen_height, screen_width = init_screen.shape
@@ -168,13 +168,14 @@ class Q_learning_model:
         self.n_actions = self.env.action_space.n
 
         self.BATCH_SIZE = 128
-        self.GAMMA = 0.999
+        self.GAMMA = 0.899
         self.EPS_START = 0.9
         self.EPS_END = 0.05
         self.EPS_DECAY = 200
         self.TARGET_UPDATE = 10
         self.steps_done = 0
         self.memory = ReplayMemory(10000)
+        self.loss = []
         self.policy_net = DQN(screen_height, screen_width, self.n_actions).to(self.device)
         self.target_net = DQN(screen_height, screen_width, self.n_actions).to(self.device)
 
@@ -213,8 +214,12 @@ class Q_learning_model:
         expected_state_action_values = (next_state_values * self.GAMMA) + reward_batch
 
         # Compute Huber loss
-        loss = F.smooth_l1_loss(state_action_values, expected_state_action_values.unsqueeze(1))
-        print("loss:", loss.data.item())
+        loss = F.huber_loss(state_action_values, expected_state_action_values.unsqueeze(1))
+        # loss = F.smooth_l1_loss(state_action_values, expected_state_action_values.unsqueeze(1))
+        self.loss.append(loss.data.item())
+
+        if loss.data.item() < 1e-3:
+            print("loss:", loss.data.item())
         # Optimize the model
         optimizer.zero_grad()
         loss.backward()
@@ -223,7 +228,12 @@ class Q_learning_model:
         optimizer.step()
 
     def get_cart_location(self, screen_width):
-        world_width = self.env.x_threshold * 2
+        if self.model_name != "CartPole-v1":
+            x_threshold = 4.
+        else:
+            x_threshold = self.env.x_threshold
+
+        world_width = x_threshold * 2
         scale = screen_width / world_width
         return int(self.env.state[0] * scale + screen_width / 2.0)  # MIDDLE OF CART
 
@@ -233,8 +243,10 @@ class Q_learning_model:
         screen = self.env.render(mode='rgb_array').transpose((2, 0, 1))
         # Cart is in the lower half, so strip off the top and bottom of the screen
         _, screen_height, screen_width = screen.shape
-        screen = screen[:, int(screen_height * 0.4):int(screen_height * 0.8)]
-        view_width = int(screen_width * 0.6)
+        h_rate = 1.0  # 0.4-0.8
+        w_rate = 0.6  # 0.6
+        screen = screen[:, int(screen_height * 0.4):int(screen_height * h_rate * 0.8)]
+        view_width = int(screen_width * w_rate)
         cart_location = self.get_cart_location(screen_width)
         if cart_location < view_width // 2:
             slice_range = slice(view_width)
@@ -275,15 +287,33 @@ class Q_learning_model:
         plt.ylabel('Duration')
         plt.plot(durations_t.numpy())
         # Take 100 episode averages and plot them too
-        if len(durations_t) >= 100:
-            means = durations_t.unfold(0, 100, 1).mean(1).view(-1)
-            means = torch.cat((torch.zeros(99), means))
+        if len(durations_t) >= 50:
+            means = durations_t.unfold(0, 50, 1).mean(1).view(-1)
+            means = torch.cat((torch.zeros(49), means))
             plt.plot(means.numpy(), label="mean duration in 100 tryouts")
         # plt.legend()
         plt.pause(0.001)  # pause a bit so that plots are updated
         if is_ipython:
             display.clear_output(wait=True)
             display.display(plt.gcf())
+
+    def save_models(self, epoch, optimizer):
+        if len(self.loss) > 0:
+            loss_min = min(self.loss)
+        else:
+            loss_min = 1.
+
+        torch.save({'epoch': epoch,
+                    'policy_state_dict': self.policy_net.state_dict(),
+                    'target_state_dict': self.target_net.state_dict(),
+                    'best_loss': loss_min,
+                    'optimizer': optimizer.state_dict(),
+                    'gamma': self.GAMMA},
+                   self.model_name + '_dqn.pth.tar')
+
+        print("policy weights -5:\n", self.policy_net.head.weight.data[:, -5:])
+        # torch.save(self.policy_net, self.model_name + '_policy_net.pth')
+        # torch.save(self.target_net, self.model_name + '_target_net.pth')
 
 
 ######################################################################
@@ -308,7 +338,12 @@ class Q_learning_model:
 #    episode.
 #
 def starter():
-    q_learner = Q_learning_model()
+    # model = "Acrobot-v1"
+    # model = "MountainCarContinuous-v0"
+    # model = "MountainCar-v0"
+    model = "CartPole-v1"
+
+    q_learner = Q_learning_model(model)
     # set up matplotlib
     plt.ion()
     # if gpu is to be used
@@ -323,12 +358,11 @@ def starter():
 
 def main():
     episode_durations = []
-    num_episodes = 20
+    num_episodes = 100
     q_learner = starter()
     q_learner.steps_done = 0
-
     initialize_learning = False
-
+    epoch = 0
     ######################################################################
     # Input extraction
     # ^^^^^^^^^^^^^^^^
@@ -344,13 +378,17 @@ def main():
     # which is the result of a clamped and down-scaled render buffer in get_screen()
 
     if not initialize_learning:
-        q_learner.policy_net = torch.load('weights_policy_net.pth')
-        q_learner.target_net = torch.load('weights_target_net.pth')
+        load_model = torch.load(q_learner.model_name + '_dqn.pth.tar')
+        epoch = load_model['epoch']
+        print("currrent epoch:", epoch)
+        q_learner.policy_net.load_state_dict(load_model['policy_state_dict'])
+        q_learner.target_net.load_state_dict(load_model['target_state_dict'])
+        print("best loss:", load_model['best_loss'])
 
     q_learner.target_net.load_state_dict(q_learner.policy_net.state_dict())
     q_learner.target_net.eval()
-
-    optimizer = optim.RMSprop(q_learner.policy_net.parameters())
+    # optimizer = optim.RMSprop(q_learner.policy_net.parameters())
+    optimizer = optim.Adam(q_learner.policy_net.parameters())
     ######################################################################
     #
     # Below, you can find the main training loop. At the beginning we reset
@@ -371,12 +409,17 @@ def main():
         last_screen = q_learner.get_screen()
         current_screen = q_learner.get_screen()
         state = current_screen - last_screen
+        q_learner.loss = []
         for t in count():
+            if t > 100:
+                break
             # Select and perform an action
             action = q_learner.select_action(state)
+            # print("action:", action.data.item())
             _, reward, done, _ = q_learner.env.step(action.item())
-            if reward != 1.:
-                print(t, "th reward:", reward)
+            # if reward != 1.:
+            #     print(t, "th reward:", reward)
+            # print(t, "th action:", action)
             reward = torch.tensor([reward], device=q_learner.device)
 
             # Observe new state
@@ -389,32 +432,24 @@ def main():
 
             # Store the transition in memory
             q_learner.memory.push(state, action, next_state, reward)
-
+            # plt.pause(0.01)
             # Move to the next state
             state = next_state
 
             # Perform one step of the optimization (on the policy network)
             q_learner.optimize_model(optimizer)
             if done:
+                if len(q_learner.loss) > 0:
+                    print("loss_min:", min(q_learner.loss), ",   loss_max:", max(q_learner.loss))
                 episode_durations.append(t + 1)
                 q_learner.plot_durations(episode_durations)
-                # torch.save({'epoch': i_episode + 1,
-                #             'state_dict': model.state_dict(),
-                #             'best_loss': lossMIN,
-                #             'optimizer': optimizer.state_dict(),
-                #             'alpha': loss.alpha,
-                #             'gamma': loss.gamma},
-                #            checkpoint_path + '/m-' + launchTimestamp + '-' + str("%.4f" % lossMIN) + 'policy_net.pth.tar')
-
-                torch.save(q_learner.policy_net, 'weights_policy_net.pth')
-                torch.save(q_learner.target_net, 'weights_target_net.pth')
                 break
         # Update the target network, copying all weights and biases in DQN
         if i_episode % q_learner.TARGET_UPDATE == 0:
             q_learner.target_net.load_state_dict(q_learner.policy_net.state_dict())
 
-    torch.save(q_learner.policy_net, 'weights_policy_net.pth')
-    torch.save(q_learner.target_net, 'weights_target_net.pth')
+    q_learner.save_models(epoch + num_episodes, optimizer)
+
     print('Complete')
     q_learner.env.render()
     q_learner.env.close()
