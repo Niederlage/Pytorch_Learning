@@ -111,20 +111,27 @@ class DQN(nn.Module):
 
     def __init__(self, h, w, outputs):
         super(DQN, self).__init__()
-        self.conv1 = nn.Conv2d(3, 16, kernel_size=5, stride=2)
+        kernel_size = 5
+        stride = 1
+        self.conv1 = nn.Conv2d(3, 16, kernel_size=kernel_size, stride=stride)
         self.bn1 = nn.BatchNorm2d(16)
-        self.conv2 = nn.Conv2d(16, 32, kernel_size=5, stride=2)
+        self.conv2 = nn.Conv2d(16, 32, kernel_size=kernel_size, stride=stride)
         self.bn2 = nn.BatchNorm2d(32)
-        self.conv3 = nn.Conv2d(32, 32, kernel_size=5, stride=2)
+        self.conv3 = nn.Conv2d(32, 32, kernel_size=kernel_size, stride=stride)
         self.bn3 = nn.BatchNorm2d(32)
+        self.conv4 = nn.Conv2d(32, 32, kernel_size=kernel_size, stride=stride)
+        self.bn4 = nn.BatchNorm2d(32)
 
         # Number of Linear input connections depends on output of conv2d layers
         # and therefore the input image size, so compute it.
-        def conv2d_size_out(size, kernel_size=5, stride=2):
+        def conv2d_size_out(size, kernel_size=kernel_size, stride=stride):
             return (size - (kernel_size - 1) - 1) // stride + 1
 
-        convw = conv2d_size_out(conv2d_size_out(conv2d_size_out(w)))
-        convh = conv2d_size_out(conv2d_size_out(conv2d_size_out(h)))
+        # convw = conv2d_size_out(conv2d_size_out(conv2d_size_out(w)))
+        # convh = conv2d_size_out(conv2d_size_out(conv2d_size_out(h)))
+        convw = conv2d_size_out(conv2d_size_out(conv2d_size_out(conv2d_size_out(w))))
+        convh = conv2d_size_out(conv2d_size_out(conv2d_size_out(conv2d_size_out(h))))
+
         linear_input_size = convw * convh * 32
         self.head = nn.Linear(linear_input_size, outputs)
 
@@ -134,6 +141,8 @@ class DQN(nn.Module):
         x = F.relu(self.bn1(self.conv1(x)))
         x = F.relu(self.bn2(self.conv2(x)))
         x = F.relu(self.bn3(self.conv3(x)))
+        x = F.relu(self.bn4(self.conv4(x)))
+
         return self.head(x.view(x.size(0), -1))
 
 
@@ -168,7 +177,7 @@ class Q_learning_model:
         self.n_actions = self.env.action_space.n
 
         self.BATCH_SIZE = 128
-        self.GAMMA = 0.899
+        self.GAMMA = 0.999
         self.EPS_START = 0.9
         self.EPS_END = 0.05
         self.EPS_DECAY = 200
@@ -214,8 +223,8 @@ class Q_learning_model:
         expected_state_action_values = (next_state_values * self.GAMMA) + reward_batch
 
         # Compute Huber loss
-        loss = F.huber_loss(state_action_values, expected_state_action_values.unsqueeze(1))
-        # loss = F.smooth_l1_loss(state_action_values, expected_state_action_values.unsqueeze(1))
+        # loss = F.huber_loss(state_action_values, expected_state_action_values.unsqueeze(1))
+        loss = F.smooth_l1_loss(state_action_values, expected_state_action_values.unsqueeze(1))
         self.loss.append(loss.data.item())
 
         if loss.data.item() < 1e-3:
@@ -358,7 +367,7 @@ def starter():
 
 def main():
     episode_durations = []
-    num_episodes = 100
+    num_episodes = 20
     q_learner = starter()
     q_learner.steps_done = 0
     initialize_learning = False
@@ -411,8 +420,8 @@ def main():
         state = current_screen - last_screen
         q_learner.loss = []
         for t in count():
-            if t > 100:
-                break
+            # if t > 100:
+            #     break
             # Select and perform an action
             action = q_learner.select_action(state)
             # print("action:", action.data.item())
